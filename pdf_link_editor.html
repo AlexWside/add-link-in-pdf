@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PDF Link Editor</title>
+
+  <!-- PDF.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs" type="module"></script>
+
+  <!-- PDF-LIB -->
+  <script src="https://unpkg.com/pdf-lib/dist/pdf-lib.min.js"></script>
+
+  <!-- Interact.js -->
+  <script src="https://cdn.jsdelivr.net/npm/interactjs/dist/interact.min.js"></script>
+
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: Arial, sans-serif;
+    }
+
+    body {
+      background: #f5f7fb;
+      padding: 24px;
+      color: #1e293b;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    .card {
+      background: white;
+      border-radius: 16px;
+      padding: 20px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+      margin-bottom: 20px;
+    }
+
+    h1 {
+      margin-bottom: 12px;
+      font-size: 28px;
+    }
+
+    p {
+      margin-bottom: 12px;
+      line-height: 1.5;
+    }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+      margin-top: 16px;
+    }
+
+    input[type="file"],
+    input[type="text"] {
+      padding: 12px;
+      border-radius: 10px;
+      border: 1px solid #cbd5e1;
+      flex: 1;
+      min-width: 250px;
+    }
+
+    button {
+      border: none;
+      padding: 12px 18px;
+      border-radius: 10px;
+      background: #2563eb;
+      color: white;
+      cursor: pointer;
+      font-weight: bold;
+      transition: 0.2s;
+    }
+
+    button:hover {
+      background: #1d4ed8;
+    }
+
+    button:disabled {
+      background: #94a3b8;
+      cursor: not-allowed;
+    }
+
+    .pdf-wrapper {
+      position: relative;
+      width: fit-content;
+      margin: auto;
+      border: 1px solid #dbeafe;
+      overflow: hidden;
+      border-radius: 12px;
+      background: white;
+    }
+
+    #pdf-canvas {
+      display: block;
+    }
+
+    #selection {
+      position: absolute;
+      border: 2px dashed #2563eb;
+      background: rgba(37, 99, 235, 0.15);
+      display: none;
+      min-width: 20px;
+      min-height: 20px;
+    }
+
+    .status {
+      margin-top: 12px;
+      font-size: 14px;
+      color: #334155;
+    }
+
+    .info {
+      margin-top: 16px;
+      padding: 14px;
+      background: #eff6ff;
+      border-radius: 10px;
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    .coordinates {
+      margin-top: 10px;
+      font-size: 13px;
+      color: #475569;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <h1>Editor de Link em PDF</h1>
+
+      <p>
+        Selecione um PDF, desenhe uma área clicável na primeira página
+        e gere uma nova versão com link invisível.
+      </p>
+
+      <div class="controls">
+        <input type="file" id="pdf-upload" accept="application/pdf" />
+
+        <input
+          type="text"
+          id="link-input"
+          placeholder="https://exemplo.com"
+        />
+
+        <button id="generate-btn" disabled>
+          Gerar PDF
+        </button>
+      </div>
+
+      <div class="status" id="status">
+        Nenhum PDF carregado.
+      </div>
+
+      <div class="coordinates" id="coordinates"></div>
+
+      <div class="info">
+        <strong>Como usar:</strong>
+        <br />
+        1. Escolha um PDF.
+        <br />
+        2. Desenhe uma área sobre o PDF.
+        <br />
+        3. Digite a URL.
+        <br />
+        4. Clique em "Gerar PDF".
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="pdf-wrapper" id="pdf-wrapper">
+        <canvas id="pdf-canvas"></canvas>
+        <div id="selection"></div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs';
+
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs';
+
+    const fileInput = document.getElementById('pdf-upload');
+    const linkInput = document.getElementById('link-input');
+    const generateBtn = document.getElementById('generate-btn');
+    const canvas = document.getElementById('pdf-canvas');
+    const selection = document.getElementById('selection');
+    const wrapper = document.getElementById('pdf-wrapper');
+    const statusText = document.getElementById('status');
+    const coordinatesText = document.getElementById('coordinates');
+
+    const ctx = canvas.getContext('2d');
+
+    let pdfBytes = null;
+    let originalPdfBytes = null;
+    let pdfDoc = null;
+    let pageViewport = null;
+    let pdfPageWidth = 0;
+    let pdfPageHeight = 0;
+
+    let isDrawing = false;
+    let startX = 0;
+    let startY = 0;
+
+    let selectionData = {
+      x: 0,
+      y: 0,
+      width: 0,
+      height: 0
+    };
+
+    // =========================
+    // CARREGAMENTO DO PDF
+    // =========================
+
+    fileInput.addEventListener('change', async (event) => {
+      try {
+        const file = event.target.files[0];
+
+        if (!file) {
+          return;
+        }
+
+        statusText.textContent = 'Carregando PDF...';
+
+        pdfBytes = await file.arrayBuffer();
+
+        // Criamos uma cópia separada para evitar problemas
+        // de ArrayBuffer destacado (detached buffer)
+        // entre PDF.js e PDF-LIB.
+        originalPdfBytes = pdfBytes.slice(0);
+
+        const loadingTask = pdfjsLib.getDocument({
+          data: pdfBytes
+        });
+
+        pdfDoc = await loadingTask.promise;
+
+        const page = await pdfDoc.getPage(1);
+
+        const scale = 1.5;
+
+        pageViewport = page.getViewport({ scale });
+
+        canvas.width = pageViewport.width;
+        canvas.height = pageViewport.height;
+
+        pdfPageWidth = page.view[2];
+        pdfPageHeight = page.view[3];
+
+        await page.render({
+          canvasContext: ctx,
+          viewport: pageViewport
+        }).promise;
+
+        statusText.textContent = 'PDF carregado. Desenhe uma área clicável.';
+
+        generateBtn.disabled = false;
+
+        resetSelection();
+      } catch (error) {
+        console.error(error);
+        alert('Erro ao carregar PDF.');
+        statusText.textContent = 'Erro ao carregar PDF.';
+      }
+    });
+
+    // =========================
+    // DESENHO DA ÁREA
+    // =========================
+
+    wrapper.addEventListener('mousedown', (event) => {
+      if (!pdfDoc) {
+        return;
+      }
+
+      // Evita iniciar novo desenho ao clicar dentro da seleção
+      if (event.target === selection) {
+        return;
+      }
+
+      isDrawing = true;
+
+      const rect = wrapper.getBoundingClientRect();
+
+      startX = event.clientX - rect.left;
+      startY = event.clientY - rect.top;
+
+      selection.style.display = 'block';
+      selection.style.left = `${startX}px`;
+      selection.style.top = `${startY}px`;
+      selection.style.width = '0px';
+      selection.style.height = '0px';
+    });
+
+    wrapper.addEventListener('mousemove', (event) => {
+      if (!isDrawing) {
+        return;
+      }
+
+      const rect = wrapper.getBoundingClientRect();
+
+      const currentX = event.clientX - rect.left;
+      const currentY = event.clientY - rect.top;
+
+      const width = currentX - startX;
+      const height = currentY - startY;
+
+      selection.style.width = `${Math.abs(width)}px`;
+      selection.style.height = `${Math.abs(height)}px`;
+
+      selection.style.left = `${width < 0 ? currentX : startX}px`;
+      selection.style.top = `${height < 0 ? currentY : startY}px`;
+    });
+
+    window.addEventListener('mouseup', () => {
+      if (!isDrawing) {
+        return;
+      }
+
+      isDrawing = false;
+
+      saveSelectionData();
+    });
+
+    // =========================
+    // REDIMENSIONAR E ARRASTAR
+    // =========================
+
+    interact('#selection')
+      .draggable({
+        listeners: {
+          move(event) {
+            const target = event.target;
+
+            const x = (parseFloat(target.getAttribute('data-x')) || 0) + event.dx;
+            const y = (parseFloat(target.getAttribute('data-y')) || 0) + event.dy;
+
+            target.style.transform = `translate(${x}px, ${y}px)`;
+
+            target.setAttribute('data-x', x);
+            target.setAttribute('data-y', y);
+
+            saveSelectionData();
+          }
+        }
+      })
+      .resizable({
+        edges: {
+          left: true,
+          right: true,
+          bottom: true,
+          top: true
+        },
+        listeners: {
+          move(event) {
+            let x = parseFloat(event.target.getAttribute('data-x')) || 0;
+            let y = parseFloat(event.target.getAttribute('data-y')) || 0;
+
+            Object.assign(event.target.style, {
+              width: `${event.rect.width}px`,
+              height: `${event.rect.height}px`
+            });
+
+            x += event.deltaRect.left;
+            y += event.deltaRect.top;
+
+            event.target.style.transform = `translate(${x}px, ${y}px)`;
+
+            event.target.setAttribute('data-x', x);
+            event.target.setAttribute('data-y', y);
+
+            saveSelectionData();
+          }
+        },
+        modifiers: [
+          interact.modifiers.restrictSize({
+            min: { width: 20, height: 20 }
+          })
+        ]
+      });
+
+    // =========================
+    // SALVA COORDENADAS
+    // =========================
+
+    function saveSelectionData() {
+      const rect = selection.getBoundingClientRect();
+      const wrapperRect = wrapper.getBoundingClientRect();
+
+      selectionData.x = rect.left - wrapperRect.left;
+      selectionData.y = rect.top - wrapperRect.top;
+      selectionData.width = rect.width;
+      selectionData.height = rect.height;
+
+      coordinatesText.innerHTML = `
+        Área selecionada:<br>
+        X: ${Math.round(selectionData.x)} | 
+        Y: ${Math.round(selectionData.y)} | 
+        Largura: ${Math.round(selectionData.width)} | 
+        Altura: ${Math.round(selectionData.height)}
+      `;
+    }
+
+    function resetSelection() {
+      selection.style.display = 'none';
+      selection.style.transform = 'translate(0px, 0px)';
+      selection.setAttribute('data-x', 0);
+      selection.setAttribute('data-y', 0);
+
+      selectionData = {
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0
+      };
+
+      coordinatesText.textContent = '';
+    }
+
+    // =========================
+    // GERA PDF COM LINK
+    // =========================
+
+    generateBtn.addEventListener('click', async () => {
+      try {
+        if (!pdfBytes) {
+          alert('Selecione um PDF.');
+          return;
+        }
+
+        if (!linkInput.value.trim()) {
+          alert('Digite uma URL válida.');
+          return;
+        }
+
+        if (selectionData.width <= 0 || selectionData.height <= 0) {
+          alert('Selecione uma área clicável.');
+          return;
+        }
+
+        statusText.textContent = 'Gerando PDF...';
+
+        // Usamos uma cópia nova do ArrayBuffer para evitar
+        // erros de "detached ArrayBuffer"
+        const safeBuffer = originalPdfBytes.slice(0);
+
+        const pdfDocLib = await PDFLib.PDFDocument.load(safeBuffer);
+
+        const page = pdfDocLib.getPage(0);
+
+        const { width, height } = page.getSize();
+
+        // =========================
+        // CONVERSÃO DE COORDENADAS
+        // =========================
+
+        const scaleX = width / canvas.width;
+        const scaleY = height / canvas.height;
+
+        const pdfX = selectionData.x * scaleX;
+
+        // PDF usa origem no canto inferior esquerdo
+        const pdfY =
+          height - ((selectionData.y + selectionData.height) * scaleY);
+
+        const pdfWidth = selectionData.width * scaleX;
+        const pdfHeight = selectionData.height * scaleY;
+
+        // =========================
+        // CRIA ANOTAÇÃO DE LINK
+        // =========================
+
+        const pageRef = page.ref;
+        const pdfContext = pdfDocLib.context;
+
+        const linkAnnotation = pdfContext.obj({
+          Type: 'Annot',
+          Subtype: 'Link',
+          Rect: [pdfX, pdfY, pdfX + pdfWidth, pdfY + pdfHeight],
+          Border: [0, 0, 0],
+          A: {
+            Type: 'Action',
+            S: 'URI',
+            URI: PDFLib.PDFString.of(linkInput.value.trim())
+          }
+        });
+
+        const linkAnnotationRef = pdfContext.register(linkAnnotation);
+
+        const annotations = page.node.Annots();
+
+        if (annotations) {
+          annotations.push(linkAnnotationRef);
+        } else {
+          page.node.set(
+            PDFLib.PDFName.of('Annots'),
+            pdfContext.obj([linkAnnotationRef])
+          );
+        }
+
+        // =========================
+        // EXPORTA PDF
+        // =========================
+
+        const modifiedPdfBytes = await pdfDocLib.save();
+
+        const blob = new Blob([modifiedPdfBytes], {
+          type: 'application/pdf'
+        });
+
+        const url = URL.createObjectURL(blob);
+
+        const a = document.createElement('a');
+        a.href = url;
+        
+        const originalName = fileInput.files[0].name;
+
+        const newName = originalName.replace(
+          /\.pdf$/i,
+          '-linked.pdf'
+        );
+        a.download = newName;
+
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+
+        URL.revokeObjectURL(url);
+
+        statusText.textContent = 'PDF gerado com sucesso!';
+      } catch (error) {
+        console.error(error);
+        alert('Erro ao gerar PDF.');
+        statusText.textContent = 'Erro ao gerar PDF.';
+      }
+    });
+  </script>
+</body>
+</html>
